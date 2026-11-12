@@ -24,7 +24,7 @@ import webbrowser
 import pymupdf
 import webview
 
-VERSION = "1.0.0"  # совпадает с тегом релиза: v1.0.0
+VERSION = "1.0.1"  # = тег релиза без «v»; поднимает «залить на гитхаб.bat»
 REPO = "analfox/OmnistraPDF"
 PDF_TYPES = ("PDF (*.pdf)",)
 WORD_TYPES = ("Word (*.doc;*.docx;*.docm;*.rtf;*.odt)", "Все файлы (*.*)")

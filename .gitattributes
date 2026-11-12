@@ -1,0 +1,2 @@
+# cmd читает .bat с переводами строк LF с ошибками (метки и goto) — всегда CRLF
+*.bat text eol=crlf

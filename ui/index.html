@@ -207,17 +207,18 @@ button { font: inherit; color: inherit; }
     <nav class="menu">
       <button data-act="open"><svg class="ico"><use href="#i-open"/></svg>Открыть PDF<span class="key">Ctrl+O</span></button>
       <button data-act="word"><svg class="ico"><use href="#i-word"/></svg>Word в PDF</button>
-      <button data-act="merge"><svg class="ico"><use href="#i-merge"/></svg><span id="mergeLabel">Объединить PDF</span></button>
     </nav>
     <div class="sec">Страницы</div>
     <nav class="menu">
       <button data-act="rotL" data-doc><svg class="ico"><use href="#i-rot-l"/></svg>Повернуть влево</button>
       <button data-act="rotR" data-doc><svg class="ico"><use href="#i-rot-r"/></svg>Повернуть вправо</button>
       <button data-act="crop" data-doc id="cropBtn"><svg class="ico"><use href="#i-crop"/></svg>Обрезать</button>
-      <button data-act="del" data-doc class="danger"><svg class="ico"><use href="#i-trash"/></svg>Удалить<span class="key">Del</span></button>
+      <button data-act="del" data-doc class="danger"><svg class="ico"><use href="#i-trash"/></svg>Удалить страницу<span class="key">Del</span></button>
     </nav>
     <div class="sec">Документ</div>
     <nav class="menu">
+      <!-- без data-doc: без открытого документа склеивает выбранные файлы в новый, с открытым — добавляет в конец -->
+      <button data-act="merge"><svg class="ico"><use href="#i-merge"/></svg>Объединить PDF</button>
       <button data-act="split" data-doc><svg class="ico"><use href="#i-split"/></svg>Разделить</button>
       <button data-act="compress" data-doc><svg class="ico"><use href="#i-shrink"/></svg>Сжать</button>
     </nav>
@@ -352,7 +353,6 @@ function drawHead() {
   }
   document.querySelectorAll('[data-doc]').forEach(b => b.disabled = !open);
   $('#cropBtn').classList.toggle('on', !!cropBox);
-  $('#mergeLabel').textContent = open ? 'Добавить PDF в конец' : 'Объединить PDF';
   $('#undo').hidden = $('#save').hidden = !open;
   $('#undo').disabled = !S.canUndo || !!cropBox;
   $('#save').disabled = !!cropBox;
