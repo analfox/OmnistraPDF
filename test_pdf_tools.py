@@ -1,9 +1,6 @@
 """Самопроверка без окна: .venv\\Scripts\\python test_pdf_tools.py (для Word -> PDF нужен Word)."""
-import functools
 import hashlib
 import http.server
-import io
-import json
 import os
 import shutil
 import sys
@@ -206,64 +203,92 @@ t.urllib.request.urlopen = offline
 assert t.Api().check_update() is None
 assert "Нет связи" in t.Api().update()["error"]
 
-# новая версия на «GitHub»: exe раздаёт локальный сервер
-srv_dir = os.path.join(tmp, "srv")
-os.makedirs(srv_dir)
-new_exe = b"MZ" + os.urandom(5000)
-with open(os.path.join(srv_dir, "new.exe"), "wb") as f:
-    f.write(new_exe)
-quiet = type("Quiet", (http.server.SimpleHTTPRequestHandler,), {"log_message": lambda *a: None})
-srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(quiet, directory=srv_dir))
+t.urllib.request.urlopen = real_urlopen
+
+# «github.com» на локальном сервере: /latest перенаправляет на /tag/vX, файлы релиза — /download/vX/…
+gh = {"latest": "v9.0.0", "files": {}}
+
+
+class FakeGitHub(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_HEAD(self):
+        self.do_GET(body=False)
+
+    def do_GET(self, body=True):
+        if self.path == "/rel/latest":
+            if isinstance(gh["latest"], int):  # GitHub отвечает ошибкой
+                self.send_response(gh["latest"])
+                self.end_headers()
+                return
+            self.send_response(302)
+            self.send_header("Location", f"/rel/tag/{gh['latest']}" if gh["latest"] else "/rel")
+            self.end_headers()
+            return
+        data = gh["files"].get(self.path, b"page" if self.path == "/rel" or self.path.startswith("/rel/tag/") else None)
+        if data is None:
+            self.send_response(404)
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        if body:
+            self.wfile.write(data)
+
+
+srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeGitHub)
 threading.Thread(target=srv.serve_forever, daemon=True).start()
-asset = {"name": "OmnistraPDF.exe", "browser_download_url": f"http://127.0.0.1:{srv.server_port}/new.exe",
-         "size": len(new_exe), "digest": "sha256:" + hashlib.sha256(new_exe).hexdigest()}
-release = {"tag_name": "v9.0.0", "html_url": "https://example.invalid", "assets": [asset]}
+t.RELEASES = f"http://127.0.0.1:{srv.server_port}/rel"
+new_exe = b"MZ" + os.urandom(5000)
+sha = hashlib.sha256(new_exe).hexdigest()
+gh["files"] = {"/rel/download/v9.0.0/OmnistraPDF.exe": new_exe,
+               "/rel/download/v9.0.0/OmnistraPDF.exe.sha256": sha.encode()}
 
-
-def fake_urlopen(req, timeout=None):
-    if "api.github.com" in req.full_url:
-        return io.BytesIO(json.dumps(release).encode())
-    return real_urlopen(req, timeout=timeout)
-
-
-t.urllib.request.urlopen = fake_urlopen
+# новая версия готова
+assert t.latest_version(5) == "9.0.0"
 assert t.Api().check_update() == {"version": "9.0.0"}
 assert t.Api().update(False) == {"version": "9.0.0"}
 opened = []
 t.webbrowser.open = opened.append  # из исходников себя не подменяем — открываем страницу релиза
-assert "в браузере" in t.Api().update(True)["msg"] and opened == ["https://example.invalid"]
+assert "в браузере" in t.Api().update(True)["msg"] and opened == [t.RELEASES + "/tag/v9.0.0"]
 
 exe = os.path.join(tmp, "OmnistraPDF.exe")
 with open(exe, "wb") as f:
     f.write(b"old")
-t.install_update(asset, exe)
+t.install_update("9.0.0", sha, exe)
 assert open(exe, "rb").read() == new_exe and open(exe + ".old", "rb").read() == b"old"
 try:  # скачалось не то: exe не трогаем
-    t.install_update(dict(asset, digest="sha256:" + "0" * 64), exe)
+    t.install_update("9.0.0", "0" * 64, exe)
     raise AssertionError("битое обновление установилось")
 except RuntimeError:
     pass
 assert open(exe, "rb").read() == new_exe and not os.path.exists(exe + ".new")
 
-release["tag_name"] = "v" + t.VERSION
-assert t.Api().check_update() is None
-assert "последняя" in t.Api().update()["msg"]
-
-# тег есть, а exe ещё собирается — не «последняя версия»
-release.update(tag_name="v9.0.0", assets=[])
+# тег есть, а файлов ещё нет — «собирается», при запуске молчим
+gh["latest"] = "v9.1.0"
 assert t.Api().check_update() is None
 assert "собирается" in t.Api().update()["msg"]
 
-
-def no_releases(req, timeout=None):
-    raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
-
-
-t.urllib.request.urlopen = no_releases  # релизов нет совсем
+# та же версия, релизов нет, GitHub ответил ошибкой
+gh["latest"] = "v" + t.VERSION
+assert t.Api().check_update() is None
+assert "последняя" in t.Api().update()["msg"]
+gh["latest"] = None
 assert t.Api().check_update() is None
 assert "нет готовой версии" in t.Api().update()["msg"]
-t.urllib.request.urlopen = real_urlopen
+gh["latest"] = 403
+assert t.Api().check_update() is None
+assert "ошибкой 403" in t.Api().update()["error"]
 srv.shutdown()
+
+# настоящий GitHub без API: номер последней версии читается
+t.RELEASES = "https://github.com/analfox/OmnistraPDF/releases"
+try:
+    print("последняя версия на GitHub:", t.latest_version(10))
+except OSError as e:
+    print("GitHub недоступен, пропускаю:", e)
 
 shutil.rmtree(t.lp(tmp))
 print("OK")

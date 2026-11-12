@@ -23,7 +23,12 @@ jobs:
         shell: bash
         run: grep -q "^VERSION = \"${GITHUB_REF_NAME#v}\"" pdf_tools.py
       - run: pyinstaller --noconfirm pdf_tools.spec
+      - name: Контрольная сумма — по ней программа проверяет скачанное обновление
+        run: (Get-FileHash dist/OmnistraPDF.exe -Algorithm SHA256).Hash.ToLower() | Set-Content -Encoding ascii -NoNewline dist/OmnistraPDF.exe.sha256
       - name: Выложить релиз
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$env:GITHUB_REF_NAME" dist/OmnistraPDF.exe --title "OmnistraPDF $($env:GITHUB_REF_NAME.TrimStart('v'))" --generate-notes
+        # черновиком, пока грузятся файлы: иначе программы увидят релиз без exe
+        run: |
+          gh release create "$env:GITHUB_REF_NAME" dist/OmnistraPDF.exe dist/OmnistraPDF.exe.sha256 --draft --title "OmnistraPDF $($env:GITHUB_REF_NAME.TrimStart('v'))" --generate-notes
+          gh release edit "$env:GITHUB_REF_NAME" --draft=false --latest

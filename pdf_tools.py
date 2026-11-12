@@ -8,7 +8,6 @@ import base64
 import ctypes
 import functools
 import hashlib
-import json
 import os
 import re
 import shutil
@@ -24,8 +23,8 @@ import webbrowser
 import pymupdf
 import webview
 
-VERSION = "1.0.2"  # = тег релиза без «v»; поднимает «залить на гитхаб.bat»
-REPO = "analfox/OmnistraPDF"
+VERSION = "1.0.3"  # = тег релиза без «v»; поднимает «залить на гитхаб.bat»
+RELEASES = "https://github.com/analfox/OmnistraPDF/releases"
 PDF_TYPES = ("PDF (*.pdf)",)
 WORD_TYPES = ("Word (*.doc;*.docx;*.docm;*.rtf;*.odt)", "Все файлы (*.*)")
 # ponytail: для отмены документ целиком хранится в памяти; на сканах в сотни МБ стоит хранить снимки на диске
@@ -176,27 +175,35 @@ def parse_version(tag):
     return tuple(int(x) for x in re.findall(r"\d+", tag)[:3])
 
 
-def latest_release(timeout):
-    """Последний релиз на GitHub и его exe (или None, если exe к релизу не приложен)."""
-    req = urllib.request.Request(f"https://api.github.com/repos/{REPO}/releases/latest",
-                                 headers={"User-Agent": f"OmnistraPDF/{VERSION}", "Accept": "application/vnd.github+json"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        rel = json.load(r)
-    asset = next((a for a in rel.get("assets", []) if a["name"].lower().endswith(".exe")), None)
-    return rel, asset
+def gh_open(url, timeout, method="GET"):
+    req = urllib.request.Request(url, method=method, headers={"User-Agent": f"OmnistraPDF/{VERSION}"})
+    return urllib.request.urlopen(req, timeout=timeout)
 
 
-def install_update(asset, exe):
+def latest_version(timeout):
+    """Номер последнего релиза. Не через API GitHub: там лимит 60 запросов в час на IP, а в офисе за одним
+    адресом его выбирают за утро (ответ 403). /releases/latest перенаправляет на /releases/tag/vX.Y.Z;
+    релизов нет — на /releases, тогда None."""
+    with gh_open(f"{RELEASES}/latest", timeout, "HEAD") as r:
+        m = re.search(r"/tag/v?([^/?#]+)$", r.geturl())
+    return m.group(1) if m else None
+
+
+def release_sha256(version, timeout):
+    """Контрольная сумма exe, её выкладывает сборка вместе с exe. Нет файла (HTTP 404) — релиз ещё не готов."""
+    with gh_open(f"{RELEASES}/download/v{version}/OmnistraPDF.exe.sha256", timeout) as r:
+        return r.read(200).decode("ascii").split()[0].lower()
+
+
+def install_update(version, sha256, exe):
     """Скачивает новый exe и ставит на место exe. Запущенный exe Windows не даёт перезаписать, но даёт переименовать."""
     new, old = exe + ".new", exe + ".old"
     h = hashlib.sha256()
-    req = urllib.request.Request(asset["browser_download_url"], headers={"User-Agent": f"OmnistraPDF/{VERSION}"})
-    with urllib.request.urlopen(req, timeout=30) as r, open(new, "wb") as f:
+    with gh_open(f"{RELEASES}/download/v{version}/OmnistraPDF.exe", 60) as r, open(new, "wb") as f:
         while chunk := r.read(1 << 20):
             f.write(chunk)
             h.update(chunk)
-    digest = asset.get("digest") or ""
-    if os.path.getsize(new) != asset["size"] or (digest.startswith("sha256:") and digest[7:] != h.hexdigest()):
+    if h.hexdigest() != sha256:
         os.remove(new)
         raise RuntimeError("Обновление скачалось с ошибкой. Попробуйте ещё раз.")
     try:
@@ -481,39 +488,44 @@ class Api:
     def check_update(self):
         """Тихая проверка при запуске: нет интернета или GitHub не ответил — None, проверим при следующем запуске."""
         try:
-            rel, asset = latest_release(timeout=5)
+            new = latest_version(timeout=5)
+            if new and parse_version(new) > parse_version(VERSION):
+                release_sha256(new, timeout=5)  # exe уже выложен
+                return {"version": new}
         except Exception:
-            return None
-        if asset and parse_version(rel["tag_name"]) > parse_version(VERSION):
-            return {"version": rel["tag_name"].lstrip("v")}
+            pass
         return None
 
     @api_call
     def update(self, install=False):
         """install=False — только узнать, есть ли новая версия; окно спросит про несохранённое и вызовет с True."""
         try:
-            rel, asset = latest_release(timeout=10)
-        except urllib.error.HTTPError as e:
-            if e.code == 404:  # релизов ещё нет: тег отправлен, а exe не собран
+            new = latest_version(timeout=10)
+            if not new:
                 return self._state(msg="На GitHub пока нет готовой версии для скачивания.", kind="info")
+            if parse_version(new) <= parse_version(VERSION):
+                return self._state(msg=f"Установлена последняя версия: {VERSION}.")
+            try:
+                sha = release_sha256(new, timeout=10)
+            except urllib.error.HTTPError as e:
+                if e.code != 404:
+                    raise
+                return self._state(msg=f"Версия {new} ещё собирается на GitHub. Попробуйте через несколько минут.",
+                                   kind="info")
+        except urllib.error.HTTPError as e:
             raise RuntimeError(f"GitHub ответил ошибкой {e.code}. Попробуйте позже.") from None
         except OSError:
             raise RuntimeError("Нет связи с GitHub. Проверьте интернет и повторите.") from None
-        new = rel["tag_name"].lstrip("v")
-        if parse_version(new) <= parse_version(VERSION):
-            return self._state(msg=f"Установлена последняя версия: {VERSION}.")
-        if not asset:
-            return self._state(msg=f"Версия {new} ещё собирается на GitHub. Попробуйте через несколько минут.",
-                               kind="info")
         if not install:
             return {"version": new}
+        page = f"{RELEASES}/tag/v{new}"
         if not getattr(sys, "frozen", False):  # запуск из исходников: себя не подменяем
-            webbrowser.open(rel["html_url"])
+            webbrowser.open(page)
             return self._state(msg=f"Версия {new} открыта в браузере.", kind="info")
         try:
-            install_update(asset, sys.executable)
+            install_update(new, sha, sys.executable)
         except PermissionError:
-            webbrowser.open(rel["html_url"])
+            webbrowser.open(page)
             raise RuntimeError("Нет прав на запись в папку программы. "
                                "Страница новой версии открыта в браузере: скачайте её вручную.") from None
         reopen = [self._path] if self._doc is not None and not self._dirty() else []
@@ -529,8 +541,10 @@ class Api:
 
 
 def remove_leftovers(exe):
-    """Старый exe после обновления: сразу его не удалить — прошлая копия ещё закрывается."""
-    time.sleep(5)
+    """Старый exe после обновления. Только удаляет файл — программу не трогает. Одна попытка: прошлая копия
+    сначала закрывается (убирает свою временную папку) и держит файл, поэтому ждём 15 с. Не вышло —
+    удалится при следующем запуске."""
+    time.sleep(15)
     for path in (exe + ".old", exe + ".new"):
         try:
             os.remove(path)
