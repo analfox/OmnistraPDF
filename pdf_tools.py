@@ -23,7 +23,7 @@ import webbrowser
 import pymupdf
 import webview
 
-VERSION = "1.0.3"  # = тег релиза без «v»; поднимает «залить на гитхаб.bat»
+VERSION = "1.0.4"  # = тег релиза без «v»; поднимает «залить на гитхаб.bat»
 RELEASES = "https://github.com/analfox/OmnistraPDF/releases"
 PDF_TYPES = ("PDF (*.pdf)",)
 WORD_TYPES = ("Word (*.doc;*.docx;*.docm;*.rtf;*.odt)", "Все файлы (*.*)")
@@ -563,7 +563,8 @@ def main():
             pass
     here = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
     window = webview.create_window("OmnistraPDF", os.path.join(here, "ui", "index.html"), js_api=api,
-                                   width=1280, height=820, min_size=(980, 620), background_color="#f6f5fa")
+                                   width=1280, height=820, min_size=(980, 620), maximized=True,
+                                   background_color="#f6f5fa")
     api._window = window
     window.events.closing += api._may_close
     try:
