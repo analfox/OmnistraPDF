@@ -96,12 +96,34 @@ with t.read_pdf(os.path.join(folder, "a_стр_1-2.pdf")) as d:
     assert d.page_count == 2
 assert "error" in api.split("9")
 
-# сохранить поверх исходного файла по длинному пути
-picker(api, a)
+# «Сохранить» — прямо в исходный файл по длинному пути, без окна
+api._dialog = lambda *a, **k: (_ for _ in ()).throw(AssertionError("«Сохранить» не должно открывать окно"))
 s = ok(api.save())
-assert not s["dirty"]
+assert not s["dirty"] and s["name"] == "a.pdf"
 with t.read_pdf(a) as d:
     assert d.page_count == 3 and d[0].rotation == 90
+
+# «Сохранить как» — отдельный файл, дальше работа идёт с ним; оригинал не меняется
+ok(api.rotate([1], 90))
+copy = os.path.join(deep, "a копия.pdf")
+picker(api, copy[:-4])  # без .pdf — допишется
+s = ok(api.save_as())
+assert s["name"] == "a копия.pdf" and not s["dirty"]
+with t.read_pdf(a) as d:
+    assert d[1].rotation == 0  # оригинал прежний
+with t.read_pdf(copy) as d:
+    assert d[1].rotation == 90
+# в чужой существующий файл — сначала вопрос «Заменить?», запись только после save_to
+other = make("другой.pdf", 1, folder=deep)
+picker(api, other)
+r = api.save_as()
+assert r == {"overwrite": other, "name": "другой.pdf"}, r
+with t.read_pdf(other) as d:
+    assert d.page_count == 1
+s = ok(api.save_to(other))
+assert s["name"] == "другой.pdf"
+with t.read_pdf(other) as d:
+    assert d.page_count == 3
 
 # закрытие с несохранённым: окно спрашивает, закрытие отменено
 ok(api.rotate([0], 90))
@@ -116,8 +138,9 @@ api = t.Api()
 m2, m10 = make("2.pdf", 2), make("10.pdf", 1)
 picker(api, m10, m2)
 s = ok(api.merge())
-assert s["dirty"] and s["name"] == "Объединённый.pdf"
+assert s["dirty"] and s["isNew"] and s["name"] == "Объединённый.pdf"
 assert [p.get_text().strip() for p in api._doc] == ["2.pdf 1", "2.pdf 2", "10.pdf 1"]
+assert "error" in api.save()  # файла ещё нет — только «Сохранить как»
 picker(api, m2)
 s = ok(api.merge())
 assert len(s["pages"]) == 5 and s["focus"] == 3
@@ -139,7 +162,7 @@ s = ok(api.compress())
 print(s["msg"])
 assert s["dirty"] and "→" in s["msg"]
 picker(api, os.path.join(tmp, "big_сжатый.pdf"))
-ok(api.save())
+ok(api.save_as())
 assert os.path.getsize(os.path.join(tmp, "big_сжатый.pdf")) < os.path.getsize(big) / 5
 api = t.Api()
 ok(api.open(make("text.pdf")))
@@ -225,6 +248,20 @@ assert open(exe, "rb").read() == new_exe and not os.path.exists(exe + ".new")
 release["tag_name"] = "v" + t.VERSION
 assert t.Api().check_update() is None
 assert "последняя" in t.Api().update()["msg"]
+
+# тег есть, а exe ещё собирается — не «последняя версия»
+release.update(tag_name="v9.0.0", assets=[])
+assert t.Api().check_update() is None
+assert "собирается" in t.Api().update()["msg"]
+
+
+def no_releases(req, timeout=None):
+    raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
+
+
+t.urllib.request.urlopen = no_releases  # релизов нет совсем
+assert t.Api().check_update() is None
+assert "нет готовой версии" in t.Api().update()["msg"]
 t.urllib.request.urlopen = real_urlopen
 srv.shutdown()
 

@@ -24,7 +24,7 @@ import webbrowser
 import pymupdf
 import webview
 
-VERSION = "1.0.1"  # = тег релиза без «v»; поднимает «залить на гитхаб.bat»
+VERSION = "1.0.2"  # = тег релиза без «v»; поднимает «залить на гитхаб.bat»
 REPO = "analfox/OmnistraPDF"
 PDF_TYPES = ("PDF (*.pdf)",)
 WORD_TYPES = ("Word (*.doc;*.docx;*.docm;*.rtf;*.odt)", "Все файлы (*.*)")
@@ -121,6 +121,8 @@ def human(e):
         return "Файл не найден: возможно, его переместили или переименовали."
     if isinstance(e, pymupdf.FileDataError):
         return "Не получилось прочитать PDF: файл повреждён или это не PDF."
+    if isinstance(getattr(e, "Message", None), str):  # ошибка .NET: str() добавил бы стек вызовов
+        return e.Message
     return com_message(e) or e.__class__.__name__
 
 
@@ -209,6 +211,33 @@ def install_update(asset, exe):
         raise
 
 
+def file_dialog(uid, save=False, multiple=False, types=PDF_TYPES, directory="", name=""):
+    """Окно «Открыть» / «Сохранить как» — то же, что у pywebview, но без проверок .NET Framework: для путей
+    длиннее 260 символов он отвечает «файл не существует» и не даёт выбрать файл. Есть ли файл и не затрём ли
+    другой — проверяем сами (lp, «Заменить?» в окне программы)."""
+    from webview.platforms import winforms as wf  # окно уже открыто, модуль загружен
+
+    d = wf.WinForms.SaveFileDialog() if save else wf.WinForms.OpenFileDialog()
+    if save:
+        d.OverwritePrompt = False
+        d.FileName = name
+    else:
+        d.Multiselect = multiple
+        d.CheckFileExists = False
+    d.CheckPathExists = False
+    d.ValidateNames = False
+    d.Filter = "|".join("{0} ({1})|{1}".format(*wf.parse_file_type(t)) for t in types)
+    d.InitialDirectory = directory if directory and os.path.isdir(lp(directory)) else os.path.expanduser("~")
+    d.RestoreDirectory = True
+    if d.ShowDialog(wf.BrowserView.instances[uid]) != wf.WinForms.DialogResult.OK:
+        return []
+    # не d.FileNames: этот геттер прогоняет путь через Path.GetFullPath и падает на длинных путях
+    import clr
+    from System.Reflection import BindingFlags
+    field = clr.GetClrType(wf.WinForms.FileDialog).GetField("fileNames", BindingFlags.NonPublic | BindingFlags.Instance)
+    return list(field.GetValue(d) or [])
+
+
 def api_call(fn):
     """Методы окна идут по одному (PyMuPDF не потокобезопасен), ошибка уходит в окно текстом."""
     @functools.wraps(fn)
@@ -231,6 +260,7 @@ class Api:
         self._path = None
         self._undo = []    # снимки (байты PDF, id страниц) для «Отменить»
         self._saved = 0    # длина _undo в момент сохранения: не совпадает — есть несохранённое
+        self._new = False  # документа ещё нет на диске (склеен из нескольких)
         self._ids = []     # id страниц: окно хранит по ним миниатюры и перерисовывает только изменённые
         self._next_id = 0
         self._closing = False
@@ -241,8 +271,10 @@ class Api:
         return list(range(self._next_id - n, self._next_id))
 
     def _load(self, doc, path, saved=True):
+        """saved=False — документа ещё нет на диске (склеен из нескольких): «Сохранить» спросит, куда."""
         self._doc, self._path, self._undo = doc, path, []
         self._saved = 0 if saved else -1
+        self._new = not saved
         self._ids = self._new_ids(len(doc))
 
     def _dirty(self):
@@ -267,7 +299,7 @@ class Api:
         s = {"open": self._doc is not None, "version": VERSION}
         if self._doc is not None:
             s.update(name=os.path.basename(self._path), path=self._path, dirty=self._dirty(),
-                     canUndo=bool(self._undo),
+                     canUndo=bool(self._undo), isNew=self._new,
                      pages=[{"id": i, "w": p.rect.width, "h": p.rect.height} for i, p in zip(self._ids, self._doc)])
         if focus is not None:
             s["focus"] = focus
@@ -276,9 +308,12 @@ class Api:
         return s
 
     def _dialog(self, kind, multiple=False, types=PDF_TYPES, directory="", name=""):
-        paths = self._window.create_file_dialog(kind, directory=directory, allow_multiple=multiple,
-                                                save_filename=name, file_types=types)
-        return list(paths or [])
+        return file_dialog(self._window.uid, kind == webview.FileDialog.SAVE, multiple, types, directory, name)
+
+    def _write(self, path):
+        write_pdf(self._doc, path)
+        self._path, self._saved, self._new = path, len(self._undo), False
+        return self._state()
 
     def _may_close(self):
         if self._closing or not self._dirty():
@@ -412,14 +447,26 @@ class Api:
 
     @api_call
     def save(self):
+        """В тот же файл. Склеенный документ ещё не на диске — окно отправит его в «Сохранить как»."""
+        if self._new:
+            raise ValueError("Документ ещё не сохранён в файл — выберите «Сохранить как».")
+        return self._write(self._path)
+
+    @api_call
+    def save_as(self):
         paths = self._dialog(webview.FileDialog.SAVE, directory=os.path.dirname(self._path),
                              name=os.path.basename(self._path))
         if not paths:
             return None
         path = paths[0] if paths[0].lower().endswith(".pdf") else paths[0] + ".pdf"
-        write_pdf(self._doc, path)
-        self._path, self._saved = path, len(self._undo)
-        return self._state(msg=f"Сохранено: {os.path.basename(path)}")
+        if os.path.exists(lp(path)) and os.path.normcase(path) != os.path.normcase(self._path):
+            return {"overwrite": path, "name": os.path.basename(path)}  # окно спросит «Заменить?» и вызовет save_to
+        return self._write(path)
+
+    @api_call
+    def save_to(self, path):
+        """Запись после «Заменить?» в окне программы."""
+        return self._write(path)
 
     @api_call
     def render(self, i, page_id, width, height):
@@ -447,14 +494,17 @@ class Api:
         try:
             rel, asset = latest_release(timeout=10)
         except urllib.error.HTTPError as e:
-            if e.code != 404:  # 404 — релизов ещё нет
-                raise RuntimeError(f"GitHub ответил ошибкой {e.code}. Попробуйте позже.") from None
-            rel, asset = {"tag_name": VERSION}, None
+            if e.code == 404:  # релизов ещё нет: тег отправлен, а exe не собран
+                return self._state(msg="На GitHub пока нет готовой версии для скачивания.", kind="info")
+            raise RuntimeError(f"GitHub ответил ошибкой {e.code}. Попробуйте позже.") from None
         except OSError:
             raise RuntimeError("Нет связи с GitHub. Проверьте интернет и повторите.") from None
         new = rel["tag_name"].lstrip("v")
-        if not asset or parse_version(new) <= parse_version(VERSION):
+        if parse_version(new) <= parse_version(VERSION):
             return self._state(msg=f"Установлена последняя версия: {VERSION}.")
+        if not asset:
+            return self._state(msg=f"Версия {new} ещё собирается на GitHub. Попробуйте через несколько минут.",
+                               kind="info")
         if not install:
             return {"version": new}
         if not getattr(sys, "frozen", False):  # запуск из исходников: себя не подменяем

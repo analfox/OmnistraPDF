@@ -240,7 +240,8 @@ button { font: inherit; color: inherit; }
       <div class="acts">
         <span class="busy" role="status"><span class="spin"></span><span id="busyText"></span></span>
         <button class="btn" data-act="undo" id="undo">Отменить</button>
-        <button class="btn btn-primary" data-act="save" id="save">Сохранить</button>
+        <button class="btn" data-act="saveAs" id="saveAs" title="Ctrl+Shift+S">Сохранить как</button>
+        <button class="btn btn-primary" data-act="save" id="save" title="Ctrl+S">Сохранить</button>
       </div>
     </header>
     <div class="top" id="top"></div>
@@ -353,9 +354,10 @@ function drawHead() {
   }
   document.querySelectorAll('[data-doc]').forEach(b => b.disabled = !open);
   $('#cropBtn').classList.toggle('on', !!cropBox);
-  $('#undo').hidden = $('#save').hidden = !open;
+  $('#undo').hidden = $('#saveAs').hidden = $('#save').hidden = !open;
   $('#undo').disabled = !S.canUndo || !!cropBox;
-  $('#save').disabled = !!cropBox;
+  $('#saveAs').disabled = !!cropBox;
+  $('#save').disabled = !!cropBox || !S.dirty;
 }
 
 function drawThumbs() {
@@ -588,8 +590,22 @@ async function keepChanges() {
     title: `Сохранить изменения в «${S.name}»?`,
     buttons: [['cancel', 'Отмена'], ['discard', 'Не сохранять', 'danger'], ['save', 'Сохранить', 'primary']],
   });
-  if (a === 'save') { const r = await call('save'); apply(r); return !!r; }
+  if (a === 'save') { const r = await saveDoc(); apply(r); return !!r; }
   return a === 'discard';
+}
+
+/* «Сохранить» — в тот же файл; «Сохранить как» и склеенный документ — через окно выбора файла.
+   Возвращает состояние или null, если не сохранили. */
+async function saveDoc(as = false) {
+  if (!as && !S.isNew) return call('save', [], 'Сохранение');
+  const r = await call('save_as', [], 'Сохранение');
+  if (!r || !r.overwrite) return r;
+  const ok = await modal({
+    title: `Заменить «${r.name}»?`,
+    text: 'Файл с таким именем уже есть в этой папке.',
+    buttons: [['cancel', 'Отмена'], ['ok', 'Заменить', 'danger']],
+  });
+  return ok ? call('save_to', [r.overwrite], 'Сохранение') : null;
 }
 
 /* ---------- действия ---------- */
@@ -615,7 +631,8 @@ const acts = {
   },
   async compress() { apply(await call('compress', [], 'Сжатие картинок — большой файл займёт время')); },
   async undo() { apply(await call('undo')); },
-  async save() { apply(await call('save', [], 'Сохранение')); },
+  async save() { apply(await saveDoc()); },
+  async saveAs() { apply(await saveDoc(true)); },
   async update() {
     const r = await call('update', [false], 'Проверка обновлений');
     if (!r || !r.version) return apply(r);
@@ -682,7 +699,7 @@ document.addEventListener('keydown', e => {
   if (busyN || !window.pywebview || document.querySelector('.overlay')) return;
   const ctrl = e.ctrlKey || e.metaKey, n = S.open ? S.pages.length : 0;
   if (ctrl && e.code === 'KeyO') acts.open();
-  else if (ctrl && e.code === 'KeyS' && S.open && !cropBox) acts.save();
+  else if (ctrl && e.code === 'KeyS' && S.open && !cropBox) { if (e.shiftKey) acts.saveAs(); else if (S.dirty) acts.save(); }
   else if (ctrl && e.code === 'KeyZ' && S.canUndo && !cropBox) acts.undo();
   else if (ctrl && e.code === 'KeyA' && n) { sel = new Set(all()); markSel(); drawHead(); drawTop(); }
   else if (e.key === 'Escape' && cropBox) acts.cropCancel();

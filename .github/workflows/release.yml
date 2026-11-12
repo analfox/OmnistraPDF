@@ -4,6 +4,8 @@ name: Релиз
 on:
   push:
     tags: ["v*"]
+  # запасной путь, если по тегу сборка не стартовала: Actions → Релиз → Run workflow → выбрать тег
+  workflow_dispatch:
 
 permissions:
   contents: write

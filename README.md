@@ -30,5 +30,6 @@ python -m venv .venv
 2. `git tag v1.0.1` и `git push origin main v1.0.1`.
 
 GitHub Actions соберёт exe и выложит релиз; программы у всех при следующем запуске предложат обновиться.
+Если минут через 10 релиза нет: вкладка Actions → «Релиз» → Run workflow → в списке выбрать тег версии.
 
 Шрифт Onest — SIL Open Font License, `ui/OFL.txt`.
