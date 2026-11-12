@@ -1,0 +1,27 @@
+# Тег vX.Y.Z -> сборка OmnistraPDF.exe и релиз на GitHub. Программы находят его через /releases/latest.
+name: Релиз
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements.txt
+      - name: Версия в коде совпадает с тегом
+        shell: bash
+        run: grep -q "^VERSION = \"${GITHUB_REF_NAME#v}\"" pdf_tools.py
+      - run: pyinstaller --noconfirm pdf_tools.spec
+      - name: Выложить релиз
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$env:GITHUB_REF_NAME" dist/OmnistraPDF.exe --title "OmnistraPDF $($env:GITHUB_REF_NAME.TrimStart('v'))" --generate-notes
