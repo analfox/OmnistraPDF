@@ -166,6 +166,78 @@ ok(api.open(make("text.pdf")))
 s = ok(api.compress())
 assert s["kind"] == "info" and not s["dirty"] and not s["canUndo"]
 
+# меню проводника: действия над файлами без окна, рядом с исходником, ничего не затирая
+p = make("меню.pdf", 3, folder=deep)
+line = t.each([p], t.menu_rotate)[0]
+assert line.startswith("✓") and "меню_повёрнутый.pdf" in line, line
+with t.read_pdf(os.path.join(deep, "меню_повёрнутый.pdf")) as d:
+    assert [x.rotation for x in d] == [90, 90, 90]
+assert "меню_повёрнутый (2).pdf" in t.each([p], t.menu_rotate)[0]  # первый не затёрт
+assert "3 файла" in t.each([p], t.menu_split)[0]
+assert len(os.listdir(t.lp(os.path.join(deep, "меню_части")))) == 3
+line = t.each([big], t.menu_compress)[0]
+assert "→" in line and "big_сжатый (2).pdf" in line, line  # big_сжатый.pdf уже есть
+assert "не получилось" in t.each([make("текст.pdf")], t.menu_compress)[0]
+assert not os.path.exists(os.path.join(tmp, "текст_сжатый.pdf"))
+assert t.each([broken_pdf], t.menu_rotate)[0].startswith("✗ битый.pdf: ")
+
+# пачка: проводник запускает копию на каждый файл — итог один на всех
+t.QUEUE = os.path.join(tmp, "очередь")
+shown = []
+batch = [make(f"пачка{i}.pdf", 1) for i in range(5)]
+threads = [threading.Thread(target=t.run_menu, args=("rotate", f, lambda *a: shown.append(a))) for f in batch]
+for th in threads:
+    th.start()
+for th in threads:
+    th.join()
+assert len(shown) == 1, shown
+title, text, failed = shown[0]
+assert title == "OmnistraPDF — Повернуть вправо" and text.startswith("Готово: 5 из 5.") and not failed, text
+assert all(os.path.exists(f[:-4] + "_повёрнутый.pdf") for f in batch)
+
+# файл, пришедший, пока открыто окно итога, не теряется — следующей пачкой
+late = make("поздний.pdf", 1)
+shown = []
+
+
+def show_and_add_late(*a):
+    shown.append(a)
+    if len(shown) == 1:
+        th = threading.Thread(target=t.run_menu, args=("rotate", late, show_and_add_late))
+        th.start()
+        th.join()  # эта копия сразу выходит: обработку держит первая
+
+
+t.run_menu("rotate", make("ранний.pdf", 1), show_and_add_late)
+assert len(shown) == 2 and "поздний.pdf" in shown[1][1], shown
+
+# запись в реестр — в тестовый ключ, настоящее меню не трогаем
+import winreg
+
+t.CLASSES = "Software\\OmnistraPDF-test\\"
+t.register_menu(r"C:\Программы\OmnistraPDF.exe")
+
+
+def reg(key, name=""):
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, t.CLASSES + key) as k:
+        return winreg.QueryValueEx(k, name)[0]
+
+
+assert reg(r"SystemFileAssociations\.docx\shell\OmnistraPDF", "ExtendedSubCommandsKey") == "OmnistraPDF.Word"
+assert reg(r"SystemFileAssociations\.pdf\shell\OmnistraPDF", "ExtendedSubCommandsKey") == "OmnistraPDF.Pdf"
+assert reg(r"SystemFileAssociations\.pdf\shell\OmnistraPDF", "Icon") == r"C:\Программы\OmnistraPDF.exe,0"
+assert reg(r"OmnistraPDF.Word\shell\1topdf\command") == r'"C:\Программы\OmnistraPDF.exe" --menu word "%1"'
+assert reg(r"OmnistraPDF.Pdf\shell\1open\command") == r'"C:\Программы\OmnistraPDF.exe" "%1"'
+assert reg(r"OmnistraPDF.Pdf\shell\1open", "MultiSelectModel") == "Single"
+assert reg(r"OmnistraPDF.Pdf\shell\4rotate", "MUIVerb") == "Повернуть вправо"
+t.unregister_menu()
+try:
+    reg(r"OmnistraPDF.Pdf\shell\1open\command")
+    raise AssertionError("пункты меню не удалились")
+except FileNotFoundError:
+    pass
+t._delete_tree("Software\\OmnistraPDF-test")
+
 # Word -> PDF: файл с путём длиннее 259 символов (Word такие сам не открывает) и битый файл
 import win32com.client
 

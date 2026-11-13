@@ -23,7 +23,7 @@ import webbrowser
 import pymupdf
 import webview
 
-VERSION = "1.0.4"  # = тег релиза без «v»; поднимает «залить на гитхаб.bat»
+VERSION = "1.0.5"  # = тег релиза без «v»; поднимает «залить на гитхаб.bat»
 RELEASES = "https://github.com/analfox/OmnistraPDF/releases"
 PDF_TYPES = ("PDF (*.pdf)",)
 WORD_TYPES = ("Word (*.doc;*.docx;*.docm;*.rtf;*.odt)", "Все файлы (*.*)")
@@ -169,6 +169,197 @@ def word_to_pdf(files):
         return lines, done
     finally:
         pythoncom.CoUninitialize()
+
+
+def shrink_images(doc):
+    doc.rewrite_images(dpi_threshold=160, dpi_target=120, quality=60)
+
+
+def split_pages(doc, path, ranges):
+    """Части документа отдельными файлами в папку «<имя>_части» рядом с path. Возвращает папку."""
+    base = os.path.splitext(path)[0]
+    folder, stem = base + "_части", os.path.basename(base)
+    os.makedirs(lp(folder), exist_ok=True)
+    for a, b in ranges:
+        with pymupdf.open() as part:
+            part.insert_pdf(doc, from_page=a, to_page=b)
+            label = f"{a + 1}" if a == b else f"{a + 1}-{b + 1}"
+            write_pdf(part, os.path.join(folder, f"{stem}_стр_{label}.pdf"))
+    return folder
+
+
+def unique_path(path):
+    """Не затирать то, что уже лежит: «имя (2).pdf», «имя (3).pdf»…"""
+    stem, ext = os.path.splitext(path)
+    n = 1
+    while os.path.exists(lp(path)):
+        n += 1
+        path = f"{stem} ({n}){ext}"
+    return path
+
+
+# ---------- меню проводника: выделить файлы → правый щелчок → OmnistraPDF → … ----------
+WORD_EXT = (".doc", ".docx", ".docm", ".rtf", ".odt")
+CLASSES = "Software\\Classes\\"  # HKCU: без прав администратора
+MENU = {  # подменю: ключ (задаёт порядок), подпись, аргументы exe, можно ли сразу несколько файлов
+    "OmnistraPDF.Word": [("1topdf", "Перевести в PDF", "--menu word", True)],
+    "OmnistraPDF.Pdf": [("1open", "Открыть в OmnistraPDF", "", False),
+                        ("2compress", "Сжать размер", "--menu compress", True),
+                        ("3split", "Разделить по страницам", "--menu split", True),
+                        ("4rotate", "Повернуть вправо", "--menu rotate", True)],
+}
+MENU_TITLES = {"word": "Перевести в PDF", "compress": "Сжать размер", "split": "Разделить по страницам",
+               "rotate": "Повернуть вправо"}
+QUEUE = os.path.join(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir(), "OmnistraPDF", "queue")
+
+
+def _delete_tree(key):
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key) as k:
+            subs = [winreg.EnumKey(k, i) for i in range(winreg.QueryInfoKey(k)[0])]
+        for sub in subs:
+            _delete_tree(key + "\\" + sub)
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key)
+    except FileNotFoundError:
+        pass
+
+
+def unregister_menu():
+    for ext in WORD_EXT + (".pdf",):
+        _delete_tree(rf"{CLASSES}SystemFileAssociations\{ext}\shell\OmnistraPDF")
+    for sub in MENU:
+        _delete_tree(CLASSES + sub)
+    ctypes.windll.shell32.SHChangeNotify(0x08000000, 0, None, None)  # SHCNE_ASSOCCHANGED: проводник перечитает меню
+
+
+def register_menu(exe):
+    """Подменю «OmnistraPDF» для Word и PDF. В Windows 11 оно в «Показать дополнительные параметры»:
+    в короткое меню пускают только программы, упакованные в MSIX. Пишется заново при каждом запуске —
+    так путь к exe верный, даже если файл переложили."""
+    import winreg
+
+    def put(key, values):
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, CLASSES + key) as k:
+            for name, value in values.items():
+                winreg.SetValueEx(k, name, 0, winreg.REG_SZ, value)
+
+    unregister_menu()  # убрать пункты, которых больше нет
+    for ext in WORD_EXT + (".pdf",):
+        put(rf"SystemFileAssociations\{ext}\shell\OmnistraPDF",
+            {"MUIVerb": "OmnistraPDF", "Icon": f"{exe},0", "MultiSelectModel": "Player",
+             "ExtendedSubCommandsKey": "OmnistraPDF.Pdf" if ext == ".pdf" else "OmnistraPDF.Word"})
+    for sub, items in MENU.items():
+        for key, label, args, many in items:
+            put(rf"{sub}\shell\{key}", {"MUIVerb": label, "MultiSelectModel": "Player" if many else "Single"})
+            put(rf"{sub}\shell\{key}\command", {"": " ".join(filter(None, (f'"{exe}"', args, '"%1"')))})
+    ctypes.windll.shell32.SHChangeNotify(0x08000000, 0, None, None)
+
+
+def each(files, fn):
+    """fn для каждого файла; ошибка в одном не останавливает остальные. Строки отчёта ✓ / ✗."""
+    lines = []
+    for f in files:
+        try:
+            lines.append(f"✓ {os.path.basename(f)}{fn(f) or ''}")
+        except Exception as e:
+            lines.append(f"✗ {os.path.basename(f)}: {human(e)}")
+    return lines
+
+
+def menu_compress(f):
+    out = unique_path(os.path.splitext(f)[0] + "_сжатый.pdf")
+    with read_pdf(f) as doc:
+        shrink_images(doc)
+        write_pdf(doc, out)
+    before, after = os.path.getsize(lp(f)), os.path.getsize(lp(out))
+    if after > before * 0.95:
+        os.remove(lp(out))
+        return " — сжать заметно не получилось, крупных картинок нет"
+    return f": {mb(before)} → {mb(after)}, «{os.path.basename(out)}»"
+
+
+def menu_split(f):
+    with read_pdf(f) as doc:
+        folder = split_pages(doc, f, [(i, i) for i in range(len(doc))])
+        return f": {plural(len(doc), 'файл', 'файла', 'файлов')} в папке «{os.path.basename(folder)}»"
+
+
+def menu_rotate(f):
+    out = unique_path(os.path.splitext(f)[0] + "_повёрнутый.pdf")
+    with read_pdf(f) as doc:
+        for page in doc:
+            page.set_rotation((page.rotation + 90) % 360)
+        write_pdf(doc, out)
+    return f" → «{os.path.basename(out)}»"
+
+
+MENU_ACTIONS = {
+    "word": lambda files: word_to_pdf(files)[0],
+    "compress": lambda files: each(files, menu_compress),
+    "split": lambda files: each(files, menu_split),
+    "rotate": lambda files: each(files, menu_rotate),
+}
+
+
+def message_box(title, text, warn):
+    flags = (0x30 if warn else 0x40) | 0x10000 | 0x40000  # значок, MB_SETFOREGROUND, MB_TOPMOST — не прятаться за проводником
+    ctypes.windll.user32.MessageBoxW(0, text, title, flags)
+
+
+def collect(folder, quiet=2):
+    """Забирает пути из очереди, пока проводник ещё запускает копии: до quiet секунд подряд без новых."""
+    files, idle = [], 0
+    while idle < quiet:
+        names = sorted(n for n in os.listdir(folder) if n.endswith(".txt"))
+        for name in names:
+            path = os.path.join(folder, name)
+            try:
+                with open(path, encoding="utf-8") as f:
+                    files.append(f.read())
+                os.remove(path)
+            except OSError:
+                pass
+        idle = 0 if names else idle + 1
+        time.sleep(1)
+    return files
+
+
+def run_menu(action, path, show=message_box):
+    """Команда из меню проводника. Проводник запускает exe на каждый выделенный файл отдельно; файлы
+    ложатся в очередь, а первая копия обрабатывает всех одной пачкой: один Word и одно окно с итогом."""
+    folder = os.path.join(QUEUE, action)
+    os.makedirs(folder, exist_ok=True)
+    name = os.path.join(folder, f"{time.time_ns()}-{os.getpid()}-{threading.get_ident()}")
+    with open(name + ".tmp", "w", encoding="utf-8") as f:
+        f.write(path)
+    os.replace(name + ".tmp", name + ".txt")  # читатель видит файл только целиком
+
+    k32 = ctypes.WinDLL("kernel32")
+    k32.CreateMutexW.restype = ctypes.c_void_p
+    k32.CreateMutexW.argtypes = (ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p)
+    k32.WaitForSingleObject.argtypes = (ctypes.c_void_p, ctypes.c_uint32)
+    k32.ReleaseMutex.argtypes = k32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    mutex = k32.CreateMutexW(None, False, f"Local\\OmnistraPDF-{action}")
+    try:
+        # заняли — обрабатываем мы; нет — файл заберёт копия, которая уже работает
+        while k32.WaitForSingleObject(mutex, 0) in (0, 0x80):  # WAIT_OBJECT_0, WAIT_ABANDONED
+            try:
+                files = sorted(collect(folder), key=natural_key)  # проводник запускает копии вразнобой
+                if files:
+                    try:
+                        lines = MENU_ACTIONS[action](files)
+                    except Exception as e:  # например, нет Word
+                        lines = [f"✗ {human(e)}"]
+                    failed = sum(line.startswith("✗") for line in lines)
+                    head = f"Готово: {len(lines) - failed} из {len(lines)}." if len(lines) > 1 or failed else "Готово."
+                    show(f"OmnistraPDF — {MENU_TITLES[action]}", head + "\n\n" + "\n".join(lines), failed)
+            finally:
+                k32.ReleaseMutex(mutex)
+            if not any(n.endswith(".txt") for n in os.listdir(folder)):  # пока показывали итог, могли прийти ещё
+                return
+    finally:
+        k32.CloseHandle(mutex)
 
 
 def parse_version(tag):
@@ -419,7 +610,7 @@ class Api:
     def compress(self):
         before = len(pdf_bytes(self._doc))
         self._snapshot()
-        self._doc.rewrite_images(dpi_threshold=160, dpi_target=120, quality=60)
+        shrink_images(self._doc)
         after = len(pdf_bytes(self._doc))
         if after > before * 0.95:
             self._restore()
@@ -431,14 +622,7 @@ class Api:
     def split(self, text):
         n = len(self._doc)
         ranges = parse_ranges(text, n) or [(i, i) for i in range(n)]
-        base = os.path.splitext(self._path)[0]
-        folder, stem = base + "_части", os.path.basename(base)
-        os.makedirs(lp(folder), exist_ok=True)
-        for a, b in ranges:
-            with pymupdf.open() as part:
-                part.insert_pdf(self._doc, from_page=a, to_page=b)
-                label = f"{a + 1}" if a == b else f"{a + 1}-{b + 1}"
-                write_pdf(part, os.path.join(folder, f"{stem}_стр_{label}.pdf"))
+        folder = split_pages(self._doc, self._path, ranges)
         try:
             os.startfile(folder)
         except OSError:
@@ -553,8 +737,13 @@ def remove_leftovers(exe):
 
 
 def main():
+    if len(sys.argv) == 4 and sys.argv[1] == "--menu" and sys.argv[2] in MENU_ACTIONS:
+        return run_menu(sys.argv[2], sys.argv[3])  # без окна: меню проводника
+    if sys.argv[1:] == ["--unregister"]:  # убрать пункты из меню проводника
+        return unregister_menu()
     if getattr(sys, "frozen", False):
         threading.Thread(target=remove_leftovers, args=(sys.executable,), daemon=True).start()
+        threading.Thread(target=register_menu, args=(sys.executable,), daemon=True).start()
     api = Api()
     if len(sys.argv) > 1:  # файл, перетащенный на exe или открытый через «Открыть с помощью»
         try:
