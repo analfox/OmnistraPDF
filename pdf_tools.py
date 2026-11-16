@@ -23,7 +23,7 @@ import webbrowser
 import pymupdf
 import webview
 
-VERSION = "1.0.5"  # = тег релиза без «v»; поднимает «залить на гитхаб.bat»
+VERSION = "1.0.6"  # = тег релиза без «v»; поднимает «залить на гитхаб.bat»
 RELEASES = "https://github.com/analfox/OmnistraPDF/releases"
 PDF_TYPES = ("PDF (*.pdf)",)
 WORD_TYPES = ("Word (*.doc;*.docx;*.docm;*.rtf;*.odt)", "Все файлы (*.*)")
@@ -125,8 +125,9 @@ def human(e):
     return com_message(e) or e.__class__.__name__
 
 
-def word_to_pdf(files):
-    """Переводит Word-файлы в PDF рядом с ними. Возвращает (строки отчёта, пути готовых PDF)."""
+def word_convert(files, ext, target, save):
+    """Перевод через невидимый Word: target(файл) — куда положить результат, save(документ, путь) — как
+    сохранить. Возвращает (строки отчёта, готовые файлы)."""
     import pythoncom
     import win32com.client
 
@@ -135,18 +136,18 @@ def word_to_pdf(files):
         try:
             word = win32com.client.DispatchEx("Word.Application")
         except Exception:
-            raise RuntimeError("Не найден Microsoft Word: он нужен, чтобы перевести файл в PDF.") from None
+            raise RuntimeError("Не найден Microsoft Word: без него перевод не работает.") from None
         word.DisplayAlerts = 0
         lines, done = [], []
         try:
             for f in files:
-                pdf = os.path.splitext(f)[0] + ".pdf"
                 try:
+                    dest = target(f)
                     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
                         # Word не открывает пути длиннее 259 символов — работаем с копией в короткой папке
                         stem = os.path.splitext(os.path.basename(f))[0][:100]
                         src = os.path.join(tmp, stem + os.path.splitext(f)[1])
-                        out = os.path.join(tmp, stem + ".pdf")
+                        out = os.path.join(tmp, stem + ext)
                         shutil.copyfile(lp(f), src)
                         try:
                             # фиктивный пароль: защищённый файл даст ошибку, а не окно пароля в невидимом Word
@@ -156,12 +157,13 @@ def word_to_pdf(files):
                         if doc is None:
                             raise RuntimeError("Word не смог открыть файл.")
                         try:
-                            doc.ExportAsFixedFormat(out, 17)  # 17 = PDF
+                            save(doc, out)
                         finally:
                             doc.Close(0)
-                        shutil.copyfile(out, lp(pdf))
-                    done.append(pdf)
-                    lines.append(f"✓ {os.path.basename(f)}")
+                        shutil.copyfile(out, lp(dest))
+                    done.append(dest)
+                    renamed = os.path.splitext(os.path.basename(dest))[0] != os.path.splitext(os.path.basename(f))[0]
+                    lines.append(f"✓ {os.path.basename(f)}" + (f" → «{os.path.basename(dest)}»" if renamed else ""))
                 except Exception as e:
                     lines.append(f"✗ {os.path.basename(f)}: {human(e)}")
         finally:
@@ -169,6 +171,40 @@ def word_to_pdf(files):
         return lines, done
     finally:
         pythoncom.CoUninitialize()
+
+
+def word_to_pdf(files):
+    """Word-файлы в PDF рядом с ними. Возвращает (строки отчёта, пути готовых PDF)."""
+    return word_convert(files, ".pdf", lambda f: os.path.splitext(f)[0] + ".pdf",
+                        lambda doc, out: doc.ExportAsFixedFormat(out, 17))  # 17 = PDF
+
+
+def skip_pdf_prompt():
+    """Перед открытием PDF Word спрашивает «Word преобразует ваш PDF-файл… ОК?», и невидимый Word ждал бы
+    вечно. Ставим за пользователя флажок «Больше не показывать это сообщение» — настройка Word в HKCU."""
+    import winreg
+
+    office = r"Software\Microsoft\Office"
+    versions = []
+    for v in ("16.0", "15.0"):  # Word 2016–365 и 2013: раньше PDF Word не открывал
+        try:
+            winreg.CloseKey(winreg.OpenKey(winreg.HKEY_CURRENT_USER, rf"{office}\{v}\Word"))
+            versions.append(v)
+        except OSError:
+            pass
+    for v in versions or ["16.0"]:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"{office}\{v}\Word\Options") as k:
+            winreg.SetValueEx(k, "DisableConvertPdfWarning", 0, winreg.REG_DWORD, 1)
+
+
+def pdf_to_word(files):
+    """PDF в .docx рядом с ними. Возвращает (строки отчёта, пути готовых .docx)."""
+    def target(f):
+        read_pdf(f).close()  # пароль или не PDF — понятная ошибка до Word, а не окно в невидимом Word
+        return unique_path(os.path.splitext(f)[0] + ".docx")  # рядом может лежать исходник с правками
+
+    skip_pdf_prompt()
+    return word_convert(files, ".docx", target, lambda doc, out: doc.SaveAs2(out, 16))  # 16 = .docx
 
 
 def shrink_images(doc):
@@ -204,12 +240,13 @@ CLASSES = "Software\\Classes\\"  # HKCU: без прав администрат�
 MENU = {  # подменю: ключ (задаёт порядок), подпись, аргументы exe, можно ли сразу несколько файлов
     "OmnistraPDF.Word": [("1topdf", "Перевести в PDF", "--menu word", True)],
     "OmnistraPDF.Pdf": [("1open", "Открыть в OmnistraPDF", "", False),
-                        ("2compress", "Сжать размер", "--menu compress", True),
-                        ("3split", "Разделить по страницам", "--menu split", True),
-                        ("4rotate", "Повернуть вправо", "--menu rotate", True)],
+                        ("2toword", "Перевести в Word", "--menu toword", True),
+                        ("3compress", "Сжать размер", "--menu compress", True),
+                        ("4split", "Разделить по страницам", "--menu split", True),
+                        ("5rotate", "Повернуть вправо", "--menu rotate", True)],
 }
-MENU_TITLES = {"word": "Перевести в PDF", "compress": "Сжать размер", "split": "Разделить по страницам",
-               "rotate": "Повернуть вправо"}
+MENU_TITLES = {"word": "Перевести в PDF", "toword": "Перевести в Word", "compress": "Сжать размер",
+               "split": "Разделить по страницам", "rotate": "Повернуть вправо"}
 QUEUE = os.path.join(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir(), "OmnistraPDF", "queue")
 
 
@@ -296,6 +333,7 @@ def menu_rotate(f):
 
 MENU_ACTIONS = {
     "word": lambda files: word_to_pdf(files)[0],
+    "toword": lambda files: pdf_to_word(files)[0],
     "compress": lambda files: each(files, menu_compress),
     "split": lambda files: each(files, menu_split),
     "rotate": lambda files: each(files, menu_rotate),
@@ -548,6 +586,22 @@ class Api:
         if failed or len(files) > 1:
             msg = f"В PDF переведено {len(done)} из {len(files)}. PDF лежат рядом с исходными файлами.\n" + "\n".join(lines)
         return self._state(focus=0 if done else None, msg=msg, kind="warning" if failed else "success")
+
+    @api_call
+    def pdf_word(self):
+        files = self._dialog(webview.FileDialog.OPEN, multiple=True,
+                             directory=os.path.dirname(self._path) if self._doc is not None else "")
+        if not files:
+            return None
+        lines, done = pdf_to_word(files)
+        failed = len(files) - len(done)
+        if len(done) == 1 and not failed:
+            try:
+                os.startfile(done[0])  # один файл переводят, чтобы править, — сразу открываем в Word
+            except OSError:
+                pass
+        msg = f"В Word переведено {len(done)} из {len(files)}. Файлы .docx лежат рядом с PDF.\n" + "\n".join(lines)
+        return self._state(msg=msg, kind="warning" if failed else "success")
 
     @api_call
     def merge(self):

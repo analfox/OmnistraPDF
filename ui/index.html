@@ -207,6 +207,7 @@ button { font: inherit; color: inherit; }
     <nav class="menu">
       <button data-act="open"><svg class="ico"><use href="#i-open"/></svg>Открыть PDF<span class="key">Ctrl+O</span></button>
       <button data-act="word"><svg class="ico"><use href="#i-word"/></svg>Word в PDF</button>
+      <button data-act="pdfword"><svg class="ico"><use href="#i-word"/></svg>PDF в Word</button>
     </nav>
     <div class="sec">Страницы</div>
     <nav class="menu">
@@ -613,6 +614,7 @@ const all = () => S.pages.map((_, i) => i);
 const acts = {
   async open() { if (await keepChanges()) apply(await call('open')); },
   async word() { if (await keepChanges()) apply(await call('word', [], 'Word переводит в PDF — большой документ займёт время')); },
+  async pdfword() { apply(await call('pdf_word', [], 'Word переводит PDF в документ — большой файл займёт время')); },
   async merge() { apply(await call('merge', [], 'Объединение')); },
   async rotL() { apply(await call('rotate', [selected(), -90])); },
   async rotR() { apply(await call('rotate', [selected(), 90])); },

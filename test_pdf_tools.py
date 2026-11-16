@@ -229,7 +229,8 @@ assert reg(r"SystemFileAssociations\.pdf\shell\OmnistraPDF", "Icon") == r"C:\П�
 assert reg(r"OmnistraPDF.Word\shell\1topdf\command") == r'"C:\Программы\OmnistraPDF.exe" --menu word "%1"'
 assert reg(r"OmnistraPDF.Pdf\shell\1open\command") == r'"C:\Программы\OmnistraPDF.exe" "%1"'
 assert reg(r"OmnistraPDF.Pdf\shell\1open", "MultiSelectModel") == "Single"
-assert reg(r"OmnistraPDF.Pdf\shell\4rotate", "MUIVerb") == "Повернуть вправо"
+assert reg(r"OmnistraPDF.Pdf\shell\5rotate", "MUIVerb") == "Повернуть вправо"
+assert reg(r"OmnistraPDF.Pdf\shell\2toword\command") == r'"C:\Программы\OmnistraPDF.exe" --menu toword "%1"'
 t.unregister_menu()
 try:
     reg(r"OmnistraPDF.Pdf\shell\1open\command")
@@ -260,6 +261,30 @@ print(s["msg"])
 assert s["open"] and s["kind"] == "warning" and "✓ Документ" in s["msg"] and "✗ битый.docx" in s["msg"]
 assert "Привет" in api._doc[0].get_text()
 assert os.path.exists(t.lp(long_docx[:-5] + ".pdf"))
+
+# PDF -> Word: цифровой PDF по длинному пути; существующий .docx не затираем; пароль — ошибка, не зависание
+import zipfile
+
+digital = os.path.join(deep, "цифровой.pdf")
+with pymupdf.open() as d:
+    d.new_page().insert_text((72, 72), "Hello OmnistraPDF digital text")
+    t.write_pdf(d, digital)
+locked = os.path.join(tmp, "с паролем.pdf")
+with pymupdf.open() as d:
+    d.new_page().insert_text((72, 72), "secret")
+    d.save(locked, encryption=pymupdf.PDF_ENCRYPT_AES_256, user_pw="1", owner_pw="1")
+lines, done = t.pdf_to_word([digital, locked])
+print("\n".join(lines))
+assert done == [os.path.join(deep, "цифровой.docx")] and lines[0] == "✓ цифровой.pdf", lines
+assert lines[1].startswith("✗ с паролем.pdf: ") and "паролем" in lines[1], lines
+with zipfile.ZipFile(t.lp(done[0])) as z:
+    assert "Hello OmnistraPDF digital text" in z.read("word/document.xml").decode("utf-8")
+lines, done = t.pdf_to_word([digital])
+assert done == [os.path.join(deep, "цифровой (2).docx")] and "→ «цифровой (2).docx»" in lines[0], lines
+api = t.Api()
+picker(api, digital)
+s = ok(api.pdf_word())
+assert "переведено 1 из 1" in s["msg"] and "цифровой (3).docx" in s["msg"], s["msg"]
 
 # обновления: сравнение версий
 assert t.parse_version("v1.10.0") > t.parse_version("1.9.3") > t.parse_version("v1.9")
